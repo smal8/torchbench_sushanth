@@ -738,59 +738,57 @@ def create_batch_size_plots(df):
     batch_sizes = sorted(df['batch_size'].unique())
     
     # Create figure with subplots for batch size analysis
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8))
     
-    # 1. Inference Time vs Batch Size - Eager Mode
-    for model in models:
-        model_data = df[df['model_name'] == model].sort_values('batch_size')
-        ax1.plot(model_data['batch_size'], model_data['eager_time_ms'], 
-                marker='o', linewidth=2, markersize=6, label=f'{model} (Eager)')
-    
-    ax1.set_xlabel('Batch Size', fontsize=12)
-    ax1.set_ylabel('Inference Time (ms)', fontsize=12)
-    ax1.set_title('Eager Mode: Inference Time vs Batch Size', fontsize=14, fontweight='bold')
-    ax1.set_xscale('log', base=2)
-    ax1.set_yscale('log')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=10)
-    ax1.set_xticks(batch_sizes)
-    ax1.set_xticklabels(batch_sizes)
-    
-    # 2. Inference Time vs Batch Size - Graph Mode  
-    for model in models:
-        model_data = df[df['model_name'] == model].sort_values('batch_size')
-        ax2.plot(model_data['batch_size'], model_data['graph_time_ms'],
-                marker='s', linewidth=2, markersize=6, label=f'{model} (Graph)')
-    
-    ax2.set_xlabel('Batch Size', fontsize=12)
-    ax2.set_ylabel('Inference Time (ms)', fontsize=12)
-    ax2.set_title('Graph Mode: Inference Time vs Batch Size', fontsize=14, fontweight='bold')
-    ax2.set_xscale('log', base=2)
-    ax2.set_yscale('log')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=10)
-    ax2.set_xticks(batch_sizes)
-    ax2.set_xticklabels(batch_sizes)
-    
-    # 3. Speedup vs Batch Size
+    # 1. Combined Inference Time vs Batch Size - Both Eager and Graph Mode
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
     for i, model in enumerate(models):
         model_data = df[df['model_name'] == model].sort_values('batch_size')
-        ax3.plot(model_data['batch_size'], model_data['speedup'],
+        color = colors[i % len(colors)]
+        
+        # Plot eager mode with solid line and circles
+        ax1.plot(model_data['batch_size'], model_data['eager_time_ms'], 
+                marker='o', linewidth=3, markersize=8, label=f'{model} (Eager)', 
+                color=color, linestyle='-', alpha=0.8)
+        
+        # Plot graph mode with dashed line and squares
+        ax1.plot(model_data['batch_size'], model_data['graph_time_ms'],
+                marker='s', linewidth=3, markersize=8, label=f'{model} (Graph)', 
+                color=color, linestyle='--', alpha=0.8)
+    
+    ax1.set_xlabel('Batch Size', fontsize=14)
+    ax1.set_ylabel('Inference Time (ms)', fontsize=14)
+    ax1.set_title('Eager vs Graph Mode: Inference Time vs Batch Size', fontsize=16, fontweight='bold')
+    ax1.set_xscale('log', base=2)
+    ax1.set_yscale('log')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=11, loc='best')
+    ax1.set_xticks(batch_sizes)
+    ax1.set_xticklabels(batch_sizes)
+    
+    # Add a text box explaining the line styles
+    ax1.text(0.02, 0.98, 'Line styles:\nSolid = Eager Mode\nDashed = Graph Mode', 
+             transform=ax1.transAxes, fontsize=11, verticalalignment='top', 
+             bbox=dict(boxstyle="round,pad=0.4", facecolor='lightgray', alpha=0.8))
+    
+    # 2. Speedup vs Batch Size
+    for i, model in enumerate(models):
+        model_data = df[df['model_name'] == model].sort_values('batch_size')
+        ax2.plot(model_data['batch_size'], model_data['speedup'],
                 marker='D', linewidth=3, markersize=8, label=model, 
                 color=colors[i % len(colors)])
     
-    ax3.set_xlabel('Batch Size', fontsize=12)
-    ax3.set_ylabel('Speedup (x)', fontsize=12)
-    ax3.set_title('Speedup vs Batch Size', fontsize=14, fontweight='bold')
-    ax3.set_xscale('log', base=2)
-    ax3.axhline(y=1, color='red', linestyle='--', alpha=0.7, label='No speedup')
-    ax3.grid(True, alpha=0.3)
-    ax3.legend(fontsize=10)
-    ax3.set_xticks(batch_sizes)
-    ax3.set_xticklabels(batch_sizes)
+    ax2.set_xlabel('Batch Size', fontsize=14)
+    ax2.set_ylabel('Speedup (x)', fontsize=14)
+    ax2.set_title('Speedup vs Batch Size', fontsize=16, fontweight='bold')
+    ax2.set_xscale('log', base=2)
+    ax2.axhline(y=1, color='red', linestyle='--', alpha=0.7, linewidth=2, label='No speedup')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=11)
+    ax2.set_xticks(batch_sizes)
+    ax2.set_xticklabels(batch_sizes)
     
-    # 4. Improved Side-by-Side Comparison: Eager vs Graph Mode
+    # 3. Improved Side-by-Side Comparison: Eager vs Graph Mode
     # Create a clean comparison chart with models on x-axis and paired bars
     model_data_avg = df.groupby('model_name').agg({
         'eager_time_ms': 'mean',
@@ -802,10 +800,10 @@ def create_batch_size_plots(df):
     width = 0.35
     
     # Create side-by-side bars for easier comparison
-    eager_bars = ax4.bar([x - width/2 for x in x_pos], model_data_avg['eager_time_ms'], 
+    eager_bars = ax3.bar([x - width/2 for x in x_pos], model_data_avg['eager_time_ms'], 
                         width, label='Eager Mode', alpha=0.8, color='lightcoral', 
                         edgecolor='black', linewidth=0.5)
-    graph_bars = ax4.bar([x + width/2 for x in x_pos], model_data_avg['graph_time_ms'], 
+    graph_bars = ax3.bar([x + width/2 for x in x_pos], model_data_avg['graph_time_ms'], 
                         width, label='Graph Mode', alpha=0.8, color='lightblue', 
                         edgecolor='black', linewidth=0.5)
     
@@ -816,28 +814,28 @@ def create_batch_size_plots(df):
         model_data_avg['speedup']
     )):
         # Eager time label
-        ax4.text(i - width/2, eager_time + max(model_data_avg['eager_time_ms']) * 0.02, 
+        ax3.text(i - width/2, eager_time + max(model_data_avg['eager_time_ms']) * 0.02, 
                 f'{eager_time:.1f}ms', ha='center', va='bottom', fontsize=9, fontweight='bold')
         # Graph time label
-        ax4.text(i + width/2, graph_time + max(model_data_avg['graph_time_ms']) * 0.02, 
+        ax3.text(i + width/2, graph_time + max(model_data_avg['graph_time_ms']) * 0.02, 
                 f'{graph_time:.1f}ms', ha='center', va='bottom', fontsize=9, fontweight='bold')
         # Speedup label between bars
         max_height = max(eager_time, graph_time)
-        ax4.text(i, max_height + max(model_data_avg['eager_time_ms']) * 0.08, 
+        ax3.text(i, max_height + max(model_data_avg['eager_time_ms']) * 0.08, 
                 f'{speedup:.2f}x', ha='center', va='bottom', fontsize=10, 
                 fontweight='bold', color='darkgreen' if speedup > 1 else 'darkred')
     
-    ax4.set_xlabel('Models', fontsize=12)
-    ax4.set_ylabel('Average Inference Time (ms)', fontsize=12)
-    ax4.set_title('Eager vs Graph Mode - Average Performance Comparison', fontsize=14, fontweight='bold')
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels(model_data_avg['model_name'], rotation=45, ha='right', fontsize=10)
-    ax4.legend(fontsize=12)
-    ax4.grid(True, alpha=0.3, axis='y')
+    ax3.set_xlabel('Models', fontsize=14)
+    ax3.set_ylabel('Average Inference Time (ms)', fontsize=14)
+    ax3.set_title('Average Performance Comparison', fontsize=16, fontweight='bold')
+    ax3.set_xticks(x_pos)
+    ax3.set_xticklabels(model_data_avg['model_name'], rotation=45, ha='right', fontsize=11)
+    ax3.legend(fontsize=12)
+    ax3.grid(True, alpha=0.3, axis='y')
     
     # Add a note about the speedup
-    ax4.text(0.02, 0.98, 'Green numbers: speedup > 1x (graph faster)\nRed numbers: speedup < 1x (eager faster)', 
-             transform=ax4.transAxes, fontsize=9, verticalalignment='top', 
+    ax3.text(0.02, 0.98, 'Green numbers: speedup > 1x (graph faster)\nRed numbers: speedup < 1x (eager faster)', 
+             transform=ax3.transAxes, fontsize=9, verticalalignment='top', 
              bbox=dict(boxstyle="round,pad=0.3", facecolor='lightyellow', alpha=0.8))
     
     plt.tight_layout()
