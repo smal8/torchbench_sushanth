@@ -724,6 +724,9 @@ def create_visualization(results):
     # Create batch size comparison visualizations
     create_batch_size_plots(df)
     
+    # Create the main eager vs graph comparison chart
+    create_main_comparison_chart(df)
+    
     # Create traditional summary plots
     create_summary_plots(df)
 
@@ -787,39 +790,131 @@ def create_batch_size_plots(df):
     ax3.set_xticks(batch_sizes)
     ax3.set_xticklabels(batch_sizes)
     
-    # 4. Eager vs Graph Comparison (Side-by-side for each model)
-    x_pos = range(len(batch_sizes))
-    width = 0.15
+    # 4. Improved Side-by-Side Comparison: Eager vs Graph Mode
+    # Create a clean comparison chart with models on x-axis and paired bars
+    model_data_avg = df.groupby('model_name').agg({
+        'eager_time_ms': 'mean',
+        'graph_time_ms': 'mean',
+        'speedup': 'mean'
+    }).reset_index()
     
-    for i, model in enumerate(models):
-        model_data = df[df['model_name'] == model].sort_values('batch_size')
-        if len(model_data) > 0:
-            eager_times = []
-            graph_times = []
-            for bs in batch_sizes:
-                eager_time = model_data[model_data['batch_size'] == bs]['eager_time_ms']
-                graph_time = model_data[model_data['batch_size'] == bs]['graph_time_ms']
-                eager_times.append(eager_time.iloc[0] if len(eager_time) > 0 else 0)
-                graph_times.append(graph_time.iloc[0] if len(graph_time) > 0 else 0)
-            
-            x_offset = [x + width * (i - len(models)/2) for x in x_pos]
-            ax4.bar([x - width/2 for x in x_offset], eager_times, width, 
-                   alpha=0.8, label=f'{model} (Eager)', color=colors[i % len(colors)])
-            ax4.bar([x + width/2 for x in x_offset], graph_times, width,
-                   alpha=0.6, label=f'{model} (Graph)', color=colors[i % len(colors)], hatch='//')
+    x_pos = range(len(model_data_avg))
+    width = 0.35
     
-    ax4.set_xlabel('Batch Size', fontsize=12)
-    ax4.set_ylabel('Inference Time (ms)', fontsize=12)
-    ax4.set_title('Eager vs Graph Mode Comparison', fontsize=14, fontweight='bold')
-    ax4.set_yscale('log')
+    # Create side-by-side bars for easier comparison
+    eager_bars = ax4.bar([x - width/2 for x in x_pos], model_data_avg['eager_time_ms'], 
+                        width, label='Eager Mode', alpha=0.8, color='lightcoral', 
+                        edgecolor='black', linewidth=0.5)
+    graph_bars = ax4.bar([x + width/2 for x in x_pos], model_data_avg['graph_time_ms'], 
+                        width, label='Graph Mode', alpha=0.8, color='lightblue', 
+                        edgecolor='black', linewidth=0.5)
+    
+    # Add value labels on top of bars
+    for i, (eager_time, graph_time, speedup) in enumerate(zip(
+        model_data_avg['eager_time_ms'], 
+        model_data_avg['graph_time_ms'], 
+        model_data_avg['speedup']
+    )):
+        # Eager time label
+        ax4.text(i - width/2, eager_time + max(model_data_avg['eager_time_ms']) * 0.02, 
+                f'{eager_time:.1f}ms', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        # Graph time label
+        ax4.text(i + width/2, graph_time + max(model_data_avg['graph_time_ms']) * 0.02, 
+                f'{graph_time:.1f}ms', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        # Speedup label between bars
+        max_height = max(eager_time, graph_time)
+        ax4.text(i, max_height + max(model_data_avg['eager_time_ms']) * 0.08, 
+                f'{speedup:.2f}x', ha='center', va='bottom', fontsize=10, 
+                fontweight='bold', color='darkgreen' if speedup > 1 else 'darkred')
+    
+    ax4.set_xlabel('Models', fontsize=12)
+    ax4.set_ylabel('Average Inference Time (ms)', fontsize=12)
+    ax4.set_title('Eager vs Graph Mode - Average Performance Comparison', fontsize=14, fontweight='bold')
     ax4.set_xticks(x_pos)
-    ax4.set_xticklabels(batch_sizes)
-    ax4.legend(fontsize=8, ncol=2)
+    ax4.set_xticklabels(model_data_avg['model_name'], rotation=45, ha='right', fontsize=10)
+    ax4.legend(fontsize=12)
     ax4.grid(True, alpha=0.3, axis='y')
+    
+    # Add a note about the speedup
+    ax4.text(0.02, 0.98, 'Green numbers: speedup > 1x (graph faster)\nRed numbers: speedup < 1x (eager faster)', 
+             transform=ax4.transAxes, fontsize=9, verticalalignment='top', 
+             bbox=dict(boxstyle="round,pad=0.3", facecolor='lightyellow', alpha=0.8))
     
     plt.tight_layout()
     plt.savefig('gat_batch_size_analysis.png', dpi=300, bbox_inches='tight')
     print(f"📈 Batch size analysis saved to gat_batch_size_analysis.png")
+
+
+def create_main_comparison_chart(df):
+    """Create a standalone chart focused on direct eager vs graph mode comparison"""
+    # Calculate average performance across all batch sizes for each model
+    model_data_avg = df.groupby('model_name').agg({
+        'eager_time_ms': 'mean',
+        'graph_time_ms': 'mean',
+        'speedup': 'mean'
+    }).reset_index().sort_values('speedup', ascending=False)
+    
+    # Create figure for the main comparison
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    x_pos = range(len(model_data_avg))
+    width = 0.35
+    
+    # Create side-by-side bars for direct comparison
+    eager_bars = ax.bar([x - width/2 for x in x_pos], model_data_avg['eager_time_ms'], 
+                       width, label='Eager Mode', alpha=0.8, color='lightcoral', 
+                       edgecolor='black', linewidth=0.7)
+    graph_bars = ax.bar([x + width/2 for x in x_pos], model_data_avg['graph_time_ms'], 
+                       width, label='Graph Mode', alpha=0.8, color='lightblue', 
+                       edgecolor='black', linewidth=0.7)
+    
+    # Add value labels on top of bars
+    for i, (eager_time, graph_time, speedup) in enumerate(zip(
+        model_data_avg['eager_time_ms'], 
+        model_data_avg['graph_time_ms'], 
+        model_data_avg['speedup']
+    )):
+        # Eager time label
+        ax.text(i - width/2, eager_time + max(model_data_avg['eager_time_ms']) * 0.01, 
+               f'{eager_time:.1f}ms', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        # Graph time label
+        ax.text(i + width/2, graph_time + max(model_data_avg['graph_time_ms']) * 0.01, 
+               f'{graph_time:.1f}ms', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        # Speedup label above both bars
+        max_height = max(eager_time, graph_time)
+        ax.text(i, max_height + max(model_data_avg['eager_time_ms']) * 0.05, 
+               f'{speedup:.2f}x', ha='center', va='bottom', fontsize=12, 
+               fontweight='bold', color='darkgreen' if speedup > 1 else 'darkred')
+    
+    # Styling
+    ax.set_xlabel('GAT Model Configurations', fontsize=14)
+    ax.set_ylabel('Average Inference Time (ms)', fontsize=14)
+    ax.set_title('GAT Models: Eager vs Graph Mode Performance Comparison', fontsize=16, fontweight='bold', pad=20)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(model_data_avg['model_name'], rotation=45, ha='right', fontsize=11)
+    ax.legend(fontsize=12, loc='upper right')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add speedup explanation
+    ax.text(0.02, 0.98, 'Speedup values above bars:\nGreen = Graph mode faster\nRed = Eager mode faster', 
+           transform=ax.transAxes, fontsize=10, verticalalignment='top', 
+           bbox=dict(boxstyle="round,pad=0.5", facecolor='lightyellow', alpha=0.9))
+    
+    # Add performance summary
+    avg_speedup = model_data_avg['speedup'].mean()
+    best_model = model_data_avg.loc[model_data_avg['speedup'].idxmax(), 'model_name']
+    worst_model = model_data_avg.loc[model_data_avg['speedup'].idxmin(), 'model_name']
+    
+    summary_text = f'Average Speedup: {avg_speedup:.2f}x\nBest: {best_model}\nWorst: {worst_model}'
+    ax.text(0.98, 0.98, summary_text, transform=ax.transAxes, fontsize=10, 
+           verticalalignment='top', horizontalalignment='right',
+           bbox=dict(boxstyle="round,pad=0.5", facecolor='lightsteelblue', alpha=0.9))
+    
+    plt.tight_layout()
+    plt.savefig('gat_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
+    print(f"📈 Main comparison chart saved to gat_graph_vs_eager_benchmark.png")
+    
+    return fig
 
 
 def create_summary_plots(df):
