@@ -730,10 +730,21 @@ def save_results(results):
     # Create DataFrame
     df = pd.DataFrame(results)
     
-    # Save to CSV
-    csv_filename = 'gcn_graph_vs_eager_results.csv'
+    # Save detailed results
+    csv_filename = 'gcn_graph_vs_eager_results_detailed.csv'
     df.to_csv(csv_filename, index=False)
-    print(f"\n📝 Results saved to {csv_filename}")
+    print(f"\n📝 Detailed results saved to {csv_filename}")
+    
+    # Create batch size comparison table
+    batch_size_table = create_batch_size_comparison_table(df)
+    comparison_filename = 'gcn_batch_size_comparison.csv'
+    batch_size_table.to_csv(comparison_filename, index=True)
+    print(f"📝 Batch size comparison saved to {comparison_filename}")
+    
+    # Display the comparison table
+    print(f"\n📊 GCN Inference Time by Batch Size (ms):")
+    print("="*120)
+    print(batch_size_table.round(2))
     
     # Generate summary statistics
     print("\n" + "="*80)
@@ -772,57 +783,225 @@ def save_results(results):
     
     print("\n" + "="*80)
 
+
+def create_batch_size_comparison_table(df):
+    """Create a table with batch sizes as columns and models as rows"""
+    # Get unique models and batch sizes
+    models = sorted(df['model_name'].unique())
+    batch_sizes = sorted(df['batch_size'].unique())
+    
+    # Create column names for eager and graph modes
+    columns = []
+    for batch_size in batch_sizes:
+        columns.append(f'Eager_BS{batch_size}')
+        columns.append(f'Graph_BS{batch_size}')
+        columns.append(f'Speedup_BS{batch_size}')
+    
+    # Initialize the comparison table
+    comparison_table = pd.DataFrame(index=models, columns=columns)
+    
+    # Fill the table with data
+    for _, row in df.iterrows():
+        model = row['model_name']
+        batch_size = row['batch_size']
+        
+        eager_col = f'Eager_BS{batch_size}'
+        graph_col = f'Graph_BS{batch_size}'
+        speedup_col = f'Speedup_BS{batch_size}'
+        
+        comparison_table.loc[model, eager_col] = row['eager_time_ms']
+        comparison_table.loc[model, graph_col] = row['graph_time_ms']
+        comparison_table.loc[model, speedup_col] = row['speedup']
+    
+    return comparison_table
+
 def create_visualization(results):
-    """Create visualization of results"""
+    """Create comprehensive visualizations of results"""
     if not results:
         return
     
     df = pd.DataFrame(results)
     
-    # Create figure with subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    # Create batch size comparison visualizations
+    create_batch_size_plots(df)
     
-    # 1. Speedup comparison by model
-    model_speedups = df.groupby('model_name')['speedup'].mean().sort_values(ascending=True)
-    ax1.barh(range(len(model_speedups)), model_speedups.values)
-    ax1.set_yticks(range(len(model_speedups)))
-    ax1.set_yticklabels(model_speedups.index, fontsize=8)
-    ax1.set_xlabel('Speedup (x)')
-    ax1.set_title('Graph Mode Speedup by Model')
-    ax1.axvline(x=1, color='red', linestyle='--', alpha=0.7, label='No speedup')
-    ax1.legend()
+    # Create traditional summary plots
+    create_summary_plots(df)
+
+
+def create_batch_size_plots(df):
+    """Create visualizations focused on batch size comparisons"""
+    # Get unique models and batch sizes
+    models = sorted(df['model_name'].unique())
+    batch_sizes = sorted(df['batch_size'].unique())
     
-    # 2. Eager vs Graph mode times
-    model_times = df.groupby('model_name')[['eager_time_ms', 'graph_time_ms']].mean()
-    x = np.arange(len(model_times))
-    width = 0.35
-    ax2.bar(x - width/2, model_times['eager_time_ms'], width, label='Eager Mode', alpha=0.8)
-    ax2.bar(x + width/2, model_times['graph_time_ms'], width, label='Graph Mode', alpha=0.8)
-    ax2.set_xlabel('Models')
-    ax2.set_ylabel('Time (ms)')
-    ax2.set_title('Execution Time Comparison')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(model_times.index, rotation=45, ha='right', fontsize=8)
-    ax2.legend()
+    # Create figure with subplots for batch size analysis
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
     
-    # 3. Compilation time vs speedup
-    ax3.scatter(df['compilation_time_s'], df['speedup'], alpha=0.6)
-    ax3.set_xlabel('Compilation Time (s)')
-    ax3.set_ylabel('Speedup (x)')
-    ax3.set_title('Compilation Time vs Speedup')
-    ax3.axhline(y=1, color='red', linestyle='--', alpha=0.7)
+    # 1. Inference Time vs Batch Size - Eager Mode
+    for model in models:
+        model_data = df[df['model_name'] == model].sort_values('batch_size')
+        ax1.plot(model_data['batch_size'], model_data['eager_time_ms'], 
+                marker='o', linewidth=2, markersize=6, label=f'{model} (Eager)')
     
-    # 4. Memory overhead
-    memory_overhead = df.groupby('model_name')['memory_overhead_mb'].mean().sort_values()
-    ax4.bar(range(len(memory_overhead)), memory_overhead.values)
-    ax4.set_xticks(range(len(memory_overhead)))
-    ax4.set_xticklabels(memory_overhead.index, rotation=45, ha='right', fontsize=8)
-    ax4.set_ylabel('Memory Overhead (MB)')
-    ax4.set_title('Memory Overhead by Model')
+    ax1.set_xlabel('Batch Size', fontsize=12)
+    ax1.set_ylabel('Inference Time (ms)', fontsize=12)
+    ax1.set_title('Eager Mode: Inference Time vs Batch Size', fontsize=14, fontweight='bold')
+    ax1.set_xscale('log', base=2)
+    ax1.set_yscale('log')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10)
+    ax1.set_xticks(batch_sizes)
+    ax1.set_xticklabels(batch_sizes)
+    
+    # 2. Inference Time vs Batch Size - Graph Mode  
+    for model in models:
+        model_data = df[df['model_name'] == model].sort_values('batch_size')
+        ax2.plot(model_data['batch_size'], model_data['graph_time_ms'],
+                marker='s', linewidth=2, markersize=6, label=f'{model} (Graph)')
+    
+    ax2.set_xlabel('Batch Size', fontsize=12)
+    ax2.set_ylabel('Inference Time (ms)', fontsize=12)
+    ax2.set_title('Graph Mode: Inference Time vs Batch Size', fontsize=14, fontweight='bold')
+    ax2.set_xscale('log', base=2)
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=10)
+    ax2.set_xticks(batch_sizes)
+    ax2.set_xticklabels(batch_sizes)
+    
+    # 3. Speedup vs Batch Size
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    for i, model in enumerate(models):
+        model_data = df[df['model_name'] == model].sort_values('batch_size')
+        ax3.plot(model_data['batch_size'], model_data['speedup'],
+                marker='D', linewidth=3, markersize=8, label=model, 
+                color=colors[i % len(colors)])
+    
+    ax3.set_xlabel('Batch Size', fontsize=12)
+    ax3.set_ylabel('Speedup (x)', fontsize=12)
+    ax3.set_title('Speedup vs Batch Size', fontsize=14, fontweight='bold')
+    ax3.set_xscale('log', base=2)
+    ax3.axhline(y=1, color='red', linestyle='--', alpha=0.7, label='No speedup')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(fontsize=10)
+    ax3.set_xticks(batch_sizes)
+    ax3.set_xticklabels(batch_sizes)
+    
+    # 4. Eager vs Graph Comparison (Side-by-side for each model)
+    x_pos = range(len(batch_sizes))
+    width = 0.15
+    
+    for i, model in enumerate(models):
+        model_data = df[df['model_name'] == model].sort_values('batch_size')
+        if len(model_data) > 0:
+            eager_times = []
+            graph_times = []
+            for bs in batch_sizes:
+                eager_time = model_data[model_data['batch_size'] == bs]['eager_time_ms']
+                graph_time = model_data[model_data['batch_size'] == bs]['graph_time_ms']
+                eager_times.append(eager_time.iloc[0] if len(eager_time) > 0 else 0)
+                graph_times.append(graph_time.iloc[0] if len(graph_time) > 0 else 0)
+            
+            x_offset = [x + width * (i - len(models)/2) for x in x_pos]
+            ax4.bar([x - width/2 for x in x_offset], eager_times, width, 
+                   alpha=0.8, label=f'{model} (Eager)', color=colors[i % len(colors)])
+            ax4.bar([x + width/2 for x in x_offset], graph_times, width,
+                   alpha=0.6, label=f'{model} (Graph)', color=colors[i % len(colors)], hatch='//')
+    
+    ax4.set_xlabel('Batch Size', fontsize=12)
+    ax4.set_ylabel('Inference Time (ms)', fontsize=12)
+    ax4.set_title('Eager vs Graph Mode Comparison', fontsize=14, fontweight='bold')
+    ax4.set_yscale('log')
+    ax4.set_xticks(x_pos)
+    ax4.set_xticklabels(batch_sizes)
+    ax4.legend(fontsize=8, ncol=2)
+    ax4.grid(True, alpha=0.3, axis='y')
     
     plt.tight_layout()
-    plt.savefig('gcn_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
-    print(f"📈 Visualization saved to gcn_graph_vs_eager_benchmark.png")
+    plt.savefig('gcn_batch_size_analysis.png', dpi=300, bbox_inches='tight')
+    print(f"📈 Batch size analysis saved to gcn_batch_size_analysis.png")
+
+
+def create_summary_plots(df):
+    """Create traditional summary visualizations"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. Average Speedup comparison by model
+    model_speedups = df.groupby('model_name')['speedup'].mean().sort_values(ascending=True)
+    bars = ax1.barh(range(len(model_speedups)), model_speedups.values, color='skyblue', alpha=0.8)
+    ax1.set_yticks(range(len(model_speedups)))
+    ax1.set_yticklabels(model_speedups.index, fontsize=10)
+    ax1.set_xlabel('Average Speedup (x)', fontsize=12)
+    ax1.set_title('Average Graph Mode Speedup by Model', fontsize=14, fontweight='bold')
+    ax1.axvline(x=1, color='red', linestyle='--', alpha=0.7, label='No speedup')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3, axis='x')
+    
+    # Add value labels on bars
+    for i, bar in enumerate(bars):
+        width = bar.get_width()
+        ax1.text(width + 0.05, bar.get_y() + bar.get_height()/2, 
+                f'{width:.2f}x', ha='left', va='center', fontsize=9)
+    
+    # 2. Compilation Time vs Average Speedup
+    model_stats = df.groupby('model_name').agg({
+        'compilation_time_s': 'mean',
+        'speedup': 'mean'
+    }).reset_index()
+    
+    scatter = ax2.scatter(model_stats['compilation_time_s'], model_stats['speedup'], 
+                         s=100, alpha=0.7, c=range(len(model_stats)), cmap='viridis')
+    ax2.set_xlabel('Average Compilation Time (s)', fontsize=12)
+    ax2.set_ylabel('Average Speedup (x)', fontsize=12)
+    ax2.set_title('Compilation Time vs Speedup', fontsize=14, fontweight='bold')
+    ax2.axhline(y=1, color='red', linestyle='--', alpha=0.7)
+    ax2.grid(True, alpha=0.3)
+    
+    # Add model labels
+    for i, row in model_stats.iterrows():
+        ax2.annotate(row['model_name'], (row['compilation_time_s'], row['speedup']),
+                    xytext=(5, 5), textcoords='offset points', fontsize=9)
+    
+    # 3. Throughput Analysis (Batch Size / Time)
+    df['eager_throughput'] = df['batch_size'] / (df['eager_time_ms'] / 1000)  # samples/sec
+    df['graph_throughput'] = df['batch_size'] / (df['graph_time_ms'] / 1000)  # samples/sec
+    
+    throughput_data = df.groupby('model_name')[['eager_throughput', 'graph_throughput']].mean()
+    x = range(len(throughput_data))
+    width = 0.35
+    
+    ax3.bar([i - width/2 for i in x], throughput_data['eager_throughput'], width, 
+           label='Eager Mode', alpha=0.8, color='lightcoral')
+    ax3.bar([i + width/2 for i in x], throughput_data['graph_throughput'], width,
+           label='Graph Mode', alpha=0.8, color='lightblue')
+    ax3.set_xlabel('Models', fontsize=12)
+    ax3.set_ylabel('Throughput (samples/sec)', fontsize=12)
+    ax3.set_title('Average Throughput Comparison', fontsize=14, fontweight='bold')
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(throughput_data.index, rotation=45, ha='right')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Memory Efficiency
+    memory_data = df.groupby('model_name')[['eager_memory_mb', 'graph_memory_mb', 'memory_overhead_mb']].mean()
+    
+    x = range(len(memory_data))
+    ax4.bar(x, memory_data['eager_memory_mb'], label='Eager Mode', alpha=0.8, color='lightgreen')
+    ax4.bar(x, memory_data['memory_overhead_mb'], bottom=memory_data['eager_memory_mb'],
+           label='Graph Mode Overhead', alpha=0.8, color='orange')
+    
+    ax4.set_xlabel('Models', fontsize=12)
+    ax4.set_ylabel('Memory Usage (MB)', fontsize=12)
+    ax4.set_title('Memory Usage Comparison', fontsize=14, fontweight='bold')
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(memory_data.index, rotation=45, ha='right')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig('gcn_summary_analysis.png', dpi=300, bbox_inches='tight')
+    print(f"📈 Summary analysis saved to gcn_summary_analysis.png")
 
 def main():
     """Main benchmarking function"""

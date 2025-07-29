@@ -1,0 +1,4 @@
+,Eager_BS1,Graph_BS1,Speedup_BS1,Eager_BS2,Graph_BS2,Speedup_BS2,Eager_BS4,Graph_BS4,Speedup_BS4,Eager_BS8,Graph_BS8,Speedup_BS8,Eager_BS16,Graph_BS16,Speedup_BS16,Eager_BS32,Graph_BS32,Speedup_BS32,Eager_BS64,Graph_BS64,Speedup_BS64
+GAT-Large,4.32,0.89,4.85,,,,,,,35.67,5.12,6.97,,,,145.23,18.76,7.74,,,
+GAT-Medium,2.15,0.58,3.71,,,,,,,18.45,3.22,5.73,,,,72.18,10.45,6.91,,,
+GAT-Small,1.06,0.39,2.71,1.98,0.6,3.33,3.81,1.0,3.82,7.73,1.76,4.39,15.02,3.23,4.66,29.22,5.76,5.07,59.98,11.79,5.09
