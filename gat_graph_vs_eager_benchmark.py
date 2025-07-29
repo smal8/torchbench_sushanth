@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-GCN Graph Mode vs Eager Mode Benchmark
+GAT Graph Mode vs Eager Mode Benchmark
 =====================================
-Benchmarking of real Graph Convolutional Network (GCN) architectures comparing:
+Benchmarking of real Graph Attention Network (GAT) architectures comparing:
 - Eager Mode: Standard PyTorch execution
 - Graph Mode: torch.compile() optimized execution
 
 GNN Architecture Tested:
-- Graph Convolutional Networks (GCN) - Real implementation with proper graph convolution
+- Graph Attention Networks (GAT) - Real implementation with proper attention mechanisms
 
 Metrics:
 - Eager mode inference time
@@ -22,7 +22,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import time
-import numpy as np
 import pandas as pd
 import gc
 import warnings
@@ -30,6 +29,7 @@ import os
 from typing import Dict, Any, Tuple, Optional, List
 from collections import defaultdict
 import matplotlib.pyplot as plt
+from utils.constants import LayerType
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -44,7 +44,7 @@ BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 NODE_COUNTS = [100, 500, 1000]  # Number of nodes in graph
 FEATURE_DIMS = [64, 128, 256]   # Node feature dimensions
 
-print(f"Running GCN benchmarks on: {DEVICE}")
+print(f"Running GAT benchmarks on: {DEVICE}")
 print(f"PyTorch version: {torch.__version__}")
 print(f"Warmup iterations: {WARMUP_RUNS}")
 print(f"Timing iterations: {TIMING_RUNS}")
@@ -66,8 +66,6 @@ def get_memory_usage():
     else:
         import psutil
         return psutil.Process(os.getpid()).memory_info().rss / 1024**2
-
-from utils.constants import LayerType
 
 
 class GAT(torch.nn.Module):
@@ -103,8 +101,6 @@ class GAT(torch.nn.Module):
             *gat_layers,
         )
 
-    # data is just a (in_nodes_features, topology) tuple, I had to do it like this because of the nn.Sequential:
-    # https://discuss.pytorch.org/t/forward-takes-2-positional-arguments-but-3-were-given-for-nn-sqeuential-with-linear-layers/65698
     def forward(self, data):
         return self.gat_net(data)
 
@@ -126,11 +122,6 @@ class GATLayer(torch.nn.Module):
         self.num_out_features = num_out_features
         self.concat = concat  # whether we should concatenate or average the attention heads
         self.add_skip_connection = add_skip_connection
-
-        #
-        # Trainable weights: linear projection matrix (denoted as "W" in the paper), attention target/source
-        # (denoted as "a" in the paper) and bias (not mentioned in the paper but present in the official GAT repo)
-        #
 
         if layer_type == LayerType.IMP1:
             # Experimenting with different options to see what is faster (tip: focus on 1 implementation at a time)
@@ -164,15 +155,9 @@ class GATLayer(torch.nn.Module):
         else:
             self.register_parameter('skip_proj', None)
 
-        #
-        # End of trainable weights
-        #
-
         self.leakyReLU = nn.LeakyReLU(0.2)  # using 0.2 as in the paper, no need to expose every setting
         self.softmax = nn.Softmax(dim=-1)  # -1 stands for apply the log-softmax along the last dimension
         self.activation = activation
-        # Probably not the nicest design but I use the same module in 3 locations, before/after features projection
-        # and for attention coefficients. Functionality-wise it's the same as using independent modules.
         self.dropout = nn.Dropout(p=dropout_prob)
 
         self.log_attention_weights = log_attention_weights  # whether we should log the attention weights
@@ -181,13 +166,7 @@ class GATLayer(torch.nn.Module):
         self.init_params(layer_type)
 
     def init_params(self, layer_type):
-        """
-        The reason we're using Glorot (aka Xavier uniform) initialization is because it's a default TF initialization:
-            https://stackoverflow.com/questions/37350131/what-is-the-default-variable-initializer-in-tensorflow
-
-        The original repo was developed in TensorFlow (TF) and they used the default initialization.
-        Feel free to experiment - there may be better initializations depending on your problem.
-        """
+        """Xavier uniform initialization as used in the original GAT implementation."""
         nn.init.xavier_uniform_(self.proj_param if layer_type == LayerType.IMP1 else self.linear_proj.weight)
         nn.init.xavier_uniform_(self.scoring_fn_target)
         nn.init.xavier_uniform_(self.scoring_fn_source)
@@ -196,11 +175,10 @@ class GATLayer(torch.nn.Module):
             torch.nn.init.zeros_(self.bias)
 
     def skip_concat_bias(self, attention_coefficients, in_nodes_features, out_nodes_features):
-        if self.log_attention_weights:  # potentially log for later visualization in playground.py
+        if self.log_attention_weights:  # potentially log for later visualization
             self.attention_weights = attention_coefficients
 
         # if the tensor is not contiguously stored in memory we'll get an error after we try to do certain ops like view
-        # only imp1 will enter this one
         if not out_nodes_features.is_contiguous():
             out_nodes_features = out_nodes_features.contiguous()
 
@@ -229,17 +207,12 @@ class GATLayer(torch.nn.Module):
 
 class GATLayerImp3(GATLayer):
     """
-    Implementation #3 was inspired by PyTorch Geometric: https://github.com/rusty1s/pytorch_geometric
-
-    But, it's hopefully much more readable! (and of similar performance)
-
-    It's suitable for both transductive and inductive settings. In the inductive setting we just merge the graphs
-    into a single graph with multiple components and this layer is agnostic to that fact! <3
+    Implementation #3 was inspired by PyTorch Geometric but much more readable!
+    It's suitable for both transductive and inductive settings.
     """
 
     src_nodes_dim = 0  # position of source nodes in edge index
     trg_nodes_dim = 1  # position of target nodes in edge index
-
     nodes_dim = 0      # node dimension/axis
     head_dim = 1       # attention head dimension/axis
 
@@ -251,140 +224,68 @@ class GATLayerImp3(GATLayer):
                       add_skip_connection, bias, log_attention_weights)
 
     def forward(self, data):
-        #
-        # Step 1: Linear Projection + regularization
-        #
-
         in_nodes_features, edge_index = data  # unpack data
         num_of_nodes = in_nodes_features.shape[self.nodes_dim]
         assert edge_index.shape[0] == 2, f'Expected edge index with shape=(2,E) got {edge_index.shape}'
 
-        # shape = (N, FIN) where N - number of nodes in the graph, FIN - number of input features per node
-        # We apply the dropout to all of the input node features (as mentioned in the paper)
-        # Note: for Cora features are already super sparse so it's questionable how much this actually helps
+        # Step 1: Linear Projection + regularization
         in_nodes_features = self.dropout(in_nodes_features)
-
-        # shape = (N, FIN) * (FIN, NH*FOUT) -> (N, NH, FOUT) where NH - number of heads, FOUT - num of output features
-        # We project the input node features into NH independent output features (one for each attention head)
         nodes_features_proj = self.linear_proj(in_nodes_features).view(-1, self.num_of_heads, self.num_out_features)
+        nodes_features_proj = self.dropout(nodes_features_proj)
 
-        nodes_features_proj = self.dropout(nodes_features_proj)  # in the official GAT imp they did dropout here as well
-
-        #
         # Step 2: Edge attention calculation
-        #
-
-        # Apply the scoring function (* represents element-wise (a.k.a. Hadamard) product)
-        # shape = (N, NH, FOUT) * (1, NH, FOUT) -> (N, NH, 1) -> (N, NH) because sum squeezes the last dimension
-        # Optimization note: torch.sum() is as performant as .sum() in my experiments
         scores_source = (nodes_features_proj * self.scoring_fn_source).sum(dim=-1)
         scores_target = (nodes_features_proj * self.scoring_fn_target).sum(dim=-1)
 
-        # We simply copy (lift) the scores for source/target nodes based on the edge index. Instead of preparing all
-        # the possible combinations of scores we just prepare those that will actually be used and those are defined
-        # by the edge index.
-        # scores shape = (E, NH), nodes_features_proj_lifted shape = (E, NH, FOUT), E - number of edges in the graph
         scores_source_lifted, scores_target_lifted, nodes_features_proj_lifted = self.lift(scores_source, scores_target, nodes_features_proj, edge_index)
         scores_per_edge = self.leakyReLU(scores_source_lifted + scores_target_lifted)
 
-        # shape = (E, NH, 1)
         attentions_per_edge = self.neighborhood_aware_softmax(scores_per_edge, edge_index[self.trg_nodes_dim], num_of_nodes)
-        # Add stochasticity to neighborhood aggregation
         attentions_per_edge = self.dropout(attentions_per_edge)
 
-        #
         # Step 3: Neighborhood aggregation
-        #
-
-        # Element-wise (aka Hadamard) product. Operator * does the same thing as torch.mul
-        # shape = (E, NH, FOUT) * (E, NH, 1) -> (E, NH, FOUT), 1 gets broadcast into FOUT
         nodes_features_proj_lifted_weighted = nodes_features_proj_lifted * attentions_per_edge
-
-        # This part sums up weighted and projected neighborhood feature vectors for every target node
-        # shape = (N, NH, FOUT)
         out_nodes_features = self.aggregate_neighbors(nodes_features_proj_lifted_weighted, edge_index, in_nodes_features, num_of_nodes)
 
-        #
         # Step 4: Residual/skip connections, concat and bias
-        #
-
         out_nodes_features = self.skip_concat_bias(attentions_per_edge, in_nodes_features, out_nodes_features)
         return (out_nodes_features, edge_index)
 
-    #
-    # Helper functions (without comments there is very little code so don't be scared!)
-    #
-
     def neighborhood_aware_softmax(self, scores_per_edge, trg_index, num_of_nodes):
-        """
-        As the fn name suggest it does softmax over the neighborhoods. Example: say we have 5 nodes in a graph.
-        Two of them 1, 2 are connected to node 3. If we want to calculate the representation for node 3 we should take
-        into account feature vectors of 1, 2 and 3 itself. Since we have scores for edges 1-3, 2-3 and 3-3
-        in scores_per_edge variable, this function will calculate attention scores like this: 1-3/(1-3+2-3+3-3)
-        (where 1-3 is overloaded notation it represents the edge 1-3 and it's (exp) score) and similarly for 2-3 and 3-3
-         i.e. for this neighborhood we don't care about other edge scores that include nodes 4 and 5.
-
-        Note:
-        Subtracting the max value from logits doesn't change the end result but it improves the numerical stability
-        and it's a fairly common "trick" used in pretty much every deep learning framework.
-        Check out this link for more details:
-
-        https://stats.stackexchange.com/questions/338285/how-does-the-subtraction-of-the-logit-maximum-improve-learning
-        """
-        # Calculate the numerator. Make logits <= 0 so that e^logit <= 1 (this will improve the numerical stability)
+        """Neighborhood-aware softmax for attention calculation"""
         scores_per_edge = scores_per_edge - scores_per_edge.max()
-        exp_scores_per_edge = scores_per_edge.exp()  # softmax
-
-        # Calculate the denominator. shape = (E, NH)
+        exp_scores_per_edge = scores_per_edge.exp()
+        
         neigborhood_aware_denominator = self.sum_edge_scores_neighborhood_aware(exp_scores_per_edge, trg_index, num_of_nodes)
-
-        # 1e-16 is theoretically not needed but is only there for numerical stability (avoid div by 0) - due to the
-        # possibility of the computer rounding a very small number all the way to 0.
         attentions_per_edge = exp_scores_per_edge / (neigborhood_aware_denominator + 1e-16)
-
-        # shape = (E, NH) -> (E, NH, 1) so that we can do element-wise multiplication with projected node features
+        
         return attentions_per_edge.unsqueeze(-1)
 
     def sum_edge_scores_neighborhood_aware(self, exp_scores_per_edge, trg_index, num_of_nodes):
-        # The shape must be the same as in exp_scores_per_edge (required by scatter_add_) i.e. from E -> (E, NH)
         trg_index_broadcasted = self.explicit_broadcast(trg_index, exp_scores_per_edge)
-
-        # shape = (N, NH), where N is the number of nodes and NH the number of attention heads
-        size = list(exp_scores_per_edge.shape)  # convert to list otherwise assignment is not possible
+        
+        size = list(exp_scores_per_edge.shape)
         size[self.nodes_dim] = num_of_nodes
         neighborhood_sums = torch.zeros(size, dtype=exp_scores_per_edge.dtype, device=exp_scores_per_edge.device)
-
-        # position i will contain a sum of exp scores of all the nodes that point to the node i (as dictated by the
-        # target index)
+        
         neighborhood_sums.scatter_add_(self.nodes_dim, trg_index_broadcasted, exp_scores_per_edge)
-
-        # Expand again so that we can use it as a softmax denominator. e.g. node i's sum will be copied to
-        # all the locations where the source nodes pointed to i (as dictated by the target index)
-        # shape = (N, NH) -> (E, NH)
         return neighborhood_sums.index_select(self.nodes_dim, trg_index)
 
     def aggregate_neighbors(self, nodes_features_proj_lifted_weighted, edge_index, in_nodes_features, num_of_nodes):
-        size = list(nodes_features_proj_lifted_weighted.shape)  # convert to list otherwise assignment is not possible
-        size[self.nodes_dim] = num_of_nodes  # shape = (N, NH, FOUT)
+        size = list(nodes_features_proj_lifted_weighted.shape)
+        size[self.nodes_dim] = num_of_nodes
         out_nodes_features = torch.zeros(size, dtype=in_nodes_features.dtype, device=in_nodes_features.device)
 
-        # shape = (E) -> (E, NH, FOUT)
         trg_index_broadcasted = self.explicit_broadcast(edge_index[self.trg_nodes_dim], nodes_features_proj_lifted_weighted)
-        # aggregation step - we accumulate projected, weighted node features for all the attention heads
-        # shape = (E, NH, FOUT) -> (N, NH, FOUT)
         out_nodes_features.scatter_add_(self.nodes_dim, trg_index_broadcasted, nodes_features_proj_lifted_weighted)
 
         return out_nodes_features
 
     def lift(self, scores_source, scores_target, nodes_features_matrix_proj, edge_index):
-        """
-        Lifts i.e. duplicates certain vectors depending on the edge index.
-        One of the tensor dims goes from N -> E (that's where the "lift" comes from).
-        """
+        """Lifts vectors depending on the edge index."""
         src_nodes_index = edge_index[self.src_nodes_dim]
         trg_nodes_index = edge_index[self.trg_nodes_dim]
 
-        # Using index_select is faster than "normal" indexing (scores_source[src_nodes_index]) in PyTorch!
         scores_source = scores_source.index_select(self.nodes_dim, src_nodes_index)
         scores_target = scores_target.index_select(self.nodes_dim, trg_nodes_index)
         nodes_features_matrix_proj_lifted = nodes_features_matrix_proj.index_select(self.nodes_dim, src_nodes_index)
@@ -392,28 +293,18 @@ class GATLayerImp3(GATLayer):
         return scores_source, scores_target, nodes_features_matrix_proj_lifted
 
     def explicit_broadcast(self, this, other):
-        # Append singleton dimensions until this.dim() == other.dim()
         for _ in range(this.dim(), other.dim()):
             this = this.unsqueeze(-1)
-
-        # Explicitly expand so that shapes are the same
         return this.expand_as(other)
 
 
-#
-# Helper functions
-#
 def get_layer_type(layer_type):
     assert isinstance(layer_type, LayerType), f'Expected {LayerType} got {type(layer_type)}.'
-
-    if layer_type == LayerType.IMP1:
-        return GATLayerImp1
-    elif layer_type == LayerType.IMP2:
-        return GATLayerImp2
-    elif layer_type == LayerType.IMP3:
+    
+    if layer_type == LayerType.IMP3:
         return GATLayerImp3
     else:
-        raise Exception(f'Layer type {layer_type} not yet supported.')
+        raise Exception(f'Layer type {layer_type} not yet supported in this benchmark.')
 
 
 # Wrapper class to adapt GAT for benchmarking
@@ -424,7 +315,7 @@ class GATModel(nn.Module):
         
         # Configure GAT architecture
         num_features_per_layer = [input_dim, hidden_dim, output_dim]
-        num_heads_per_layer = [num_heads] * (num_layers - 1)
+        num_heads_per_layer = [num_heads] * num_layers
         
         self.gat = GAT(
             num_of_layers=num_layers,
@@ -435,10 +326,6 @@ class GATModel(nn.Module):
             dropout=dropout,
             layer_type=LayerType.IMP3  # Use most efficient implementation
         )
-        
-        # Global pooling layer
-        final_dim = output_dim  # GAT's final layer doesn't concat heads
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
         
     def forward(self, x, edge_index):
         batch_size, num_nodes, feature_dim = x.shape
@@ -462,45 +349,40 @@ class GATModel(nn.Module):
         return torch.stack(outputs, dim=0).squeeze(1)  # (batch_size, output_dim)
 
 
-
-
-
-
-
-
-
-
-
 def create_graph_data(batch_size, num_nodes, feature_dim):
-    """Create synthetic graph data with proper adjacency matrices"""
+    """Create synthetic graph data with proper edge indices for GAT"""
     # Node features
     x = torch.randn(batch_size, num_nodes, feature_dim, device=DEVICE)
     
-    # Create random adjacency matrices for each graph in batch
-    adj_matrices = []
+    # Create edge indices for each graph in batch
+    edge_indices = []
     for _ in range(batch_size):
-        # Create random sparse adjacency matrix
-        adj = torch.rand(num_nodes, num_nodes, device=DEVICE)
-        adj = (adj > 0.8).float()  # Make sparse (20% connectivity)
+        # Create random edges (ensuring connectivity)
+        num_edges = min(num_nodes * 3, num_nodes * (num_nodes - 1) // 2)  # At most complete graph
         
-        # Make symmetric (undirected graph)
-        adj = (adj + adj.t()) / 2
+        # Generate random edges
+        sources = torch.randint(0, num_nodes, (num_edges,), device=DEVICE)
+        targets = torch.randint(0, num_nodes, (num_edges,), device=DEVICE)
         
-        # Ensure at least some connectivity
-        if adj.sum() == 0:
-            # Add a few random edges if completely disconnected
-            indices = torch.randint(0, num_nodes, (2, min(5, num_nodes)), device=DEVICE)
-            adj[indices[0], indices[1]] = 1
-            adj[indices[1], indices[0]] = 1
+        # Add self-loops to ensure each node is connected
+        self_loops_src = torch.arange(num_nodes, device=DEVICE)
+        self_loops_tgt = torch.arange(num_nodes, device=DEVICE)
         
-        adj_matrices.append(adj)
+        # Combine edges and self-loops
+        all_sources = torch.cat([sources, self_loops_src])
+        all_targets = torch.cat([targets, self_loops_tgt])
+        
+        # Create edge index (2, E)
+        edge_index = torch.stack([all_sources, all_targets], dim=0)
+        edge_indices.append(edge_index)
     
     # Stack into batch tensor
-    adj_matrix = torch.stack(adj_matrices, dim=0)
+    edge_index_batch = torch.stack(edge_indices, dim=0)
     
-    return x, adj_matrix
+    return x, edge_index_batch
 
-def measure_eager_inference(model, x, adj_matrix, model_name):
+
+def measure_eager_inference(model, x, edge_index, model_name):
     """Measure eager mode inference time"""
     print(f"    Measuring eager mode for {model_name}...")
     
@@ -509,7 +391,7 @@ def measure_eager_inference(model, x, adj_matrix, model_name):
     # Warmup
     with torch.no_grad():
         for _ in range(WARMUP_RUNS):
-            _ = model(x, adj_matrix)
+            _ = model(x, edge_index)
     
     clear_cache()
     
@@ -522,7 +404,7 @@ def measure_eager_inference(model, x, adj_matrix, model_name):
             start_memory = get_memory_usage()
             
             start_time = time.perf_counter()
-            _ = model(x, adj_matrix)
+            _ = model(x, edge_index)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             end_time = time.perf_counter()
@@ -533,14 +415,15 @@ def measure_eager_inference(model, x, adj_matrix, model_name):
             memory_usage.append(end_memory - start_memory)
     
     return {
-        'mean_time': np.mean(times),
-        'std_time': np.std(times),
-        'min_time': np.min(times),
-        'max_time': np.max(times),
-        'memory_usage': np.mean(memory_usage)
+        'mean_time': sum(times) / len(times),
+        'std_time': (sum((t - sum(times)/len(times))**2 for t in times) / len(times))**0.5,
+        'min_time': min(times),
+        'max_time': max(times),
+        'memory_usage': sum(memory_usage) / len(memory_usage)
     }
 
-def measure_compilation_time(model, x, adj_matrix, model_name):
+
+def measure_compilation_time(model, x, edge_index, model_name):
     """Measure compilation time and return compiled model"""
     print(f"    Measuring compilation time for {model_name}...")
     
@@ -552,7 +435,7 @@ def measure_compilation_time(model, x, adj_matrix, model_name):
         
         # First forward pass triggers compilation
         with torch.no_grad():
-            _ = compiled_model(x, adj_matrix)
+            _ = compiled_model(x, edge_index)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         
@@ -565,7 +448,8 @@ def measure_compilation_time(model, x, adj_matrix, model_name):
         print(f"    Compilation failed for {model_name}: {e}")
         return None, 0.0
 
-def measure_graph_mode_inference(compiled_model, x, adj_matrix, model_name):
+
+def measure_graph_mode_inference(compiled_model, x, edge_index, model_name):
     """Measure graph mode inference time"""
     print(f"    Measuring graph mode for {model_name}...")
     
@@ -577,7 +461,7 @@ def measure_graph_mode_inference(compiled_model, x, adj_matrix, model_name):
     # Warmup (compilation already done)
     with torch.no_grad():
         for _ in range(WARMUP_RUNS):
-            _ = compiled_model(x, adj_matrix)
+            _ = compiled_model(x, edge_index)
     
     clear_cache()
     
@@ -590,7 +474,7 @@ def measure_graph_mode_inference(compiled_model, x, adj_matrix, model_name):
             start_memory = get_memory_usage()
             
             start_time = time.perf_counter()
-            _ = compiled_model(x, adj_matrix)
+            _ = compiled_model(x, edge_index)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             end_time = time.perf_counter()
@@ -601,21 +485,22 @@ def measure_graph_mode_inference(compiled_model, x, adj_matrix, model_name):
             memory_usage.append(end_memory - start_memory)
     
     return {
-        'mean_time': np.mean(times),
-        'std_time': np.std(times),
-        'min_time': np.min(times),
-        'max_time': np.max(times),
-        'memory_usage': np.mean(memory_usage)
+        'mean_time': sum(times) / len(times),
+        'std_time': (sum((t - sum(times)/len(times))**2 for t in times) / len(times))**0.5,
+        'min_time': min(times),
+        'max_time': max(times),
+        'memory_usage': sum(memory_usage) / len(memory_usage)
     }
 
-def run_gnn_benchmark():
-    """Run comprehensive GNN benchmarking"""
+
+def run_gat_benchmark():
+    """Run comprehensive GAT benchmarking"""
     
-    # Define GCN models to test (real implementation based on user's code)
-    gnn_models = {
-        'GCN-Small': (GCNModel, {'input_dim': 64, 'hidden_dim': 128, 'output_dim': 32, 'num_layers': 2}),
-        'GCN-Medium': (GCNModel, {'input_dim': 128, 'hidden_dim': 256, 'output_dim': 64, 'num_layers': 3}),
-        'GCN-Large': (GCNModel, {'input_dim': 256, 'hidden_dim': 512, 'output_dim': 128, 'num_layers': 4}),
+    # Define GAT models to test (real implementation based on user's code)
+    gat_models = {
+        'GAT-Small': (GATModel, {'input_dim': 64, 'hidden_dim': 128, 'output_dim': 32, 'num_layers': 2, 'num_heads': 4}),
+        'GAT-Medium': (GATModel, {'input_dim': 128, 'hidden_dim': 256, 'output_dim': 64, 'num_layers': 3, 'num_heads': 8}),
+        'GAT-Large': (GATModel, {'input_dim': 256, 'hidden_dim': 512, 'output_dim': 128, 'num_layers': 4, 'num_heads': 8}),
     }
     
     # Graph configurations to test - different batch sizes with fixed graph properties
@@ -639,7 +524,7 @@ def run_gnn_benchmark():
     results = []
     
     print("="*80)
-    print("GCN GRAPH MODE vs EAGER MODE BENCHMARK")
+    print("GAT GRAPH MODE vs EAGER MODE BENCHMARK")
     print("="*80)
     print(f"Total configurations to test: {len(graph_configs)}")
     print(f"Batch sizes: {BATCH_SIZES}")
@@ -655,31 +540,33 @@ def run_gnn_benchmark():
         print("-" * 60)
         
         # Create graph data for this configuration
-        x, adj_matrix = create_graph_data(
+        x, edge_index = create_graph_data(
             graph_config['batch_size'], 
             graph_config['num_nodes'], 
             graph_config['feature_dim']
         )
         
-        for model_name, (model_class, model_kwargs) in gnn_models.items():
+        for model_name, (model_class, model_kwargs) in gat_models.items():
             # Skip models that don't match the feature dimension
             if model_kwargs['input_dim'] != graph_config['feature_dim']:
                 continue
                 
             print(f"\n🧠 Testing {model_name}...")
             
+            model = None
+            compiled_model = None
             try:
                 # Create model
                 model = model_class(**model_kwargs).to(DEVICE)
                 
                 # Measure eager mode
-                eager_results = measure_eager_inference(model, x, adj_matrix, model_name)
+                eager_results = measure_eager_inference(model, x, edge_index, model_name)
                 
                 # Measure compilation time and get compiled model
-                compiled_model, compilation_time = measure_compilation_time(model, x, adj_matrix, model_name)
+                compiled_model, compilation_time = measure_compilation_time(model, x, edge_index, model_name)
                 
                 # Measure graph mode
-                graph_results = measure_graph_mode_inference(compiled_model, x, adj_matrix, model_name)
+                graph_results = measure_graph_mode_inference(compiled_model, x, edge_index, model_name)
                 
                 if graph_results is not None:
                     speedup = eager_results['mean_time'] / graph_results['mean_time']
@@ -714,12 +601,14 @@ def run_gnn_benchmark():
                 print(f"  ❌ Error testing {model_name}: {e}")
                 
             # Clean up
-            del model
-            if 'compiled_model' in locals():
+            if model is not None:
+                del model
+            if compiled_model is not None:
                 del compiled_model
             clear_cache()
     
     return results
+
 
 def save_results(results):
     """Save results to CSV and generate summary"""
@@ -731,7 +620,7 @@ def save_results(results):
     df = pd.DataFrame(results)
     
     # Save to CSV
-    csv_filename = 'gcn_graph_vs_eager_results.csv'
+    csv_filename = 'gat_graph_vs_eager_results.csv'
     df.to_csv(csv_filename, index=False)
     print(f"\n📝 Results saved to {csv_filename}")
     
@@ -749,7 +638,7 @@ def save_results(results):
     
     # Model family analysis
     print(f"\n📊 Speedup by Model Family:")
-    for family in ['GCN']:
+    for family in ['GAT']:
         family_data = df[df['model_name'].str.contains(family)]
         if not family_data.empty:
             print(f"  {family}: {family_data['speedup'].mean():.2f}x (avg)")
@@ -771,6 +660,7 @@ def save_results(results):
         print(f"  {row['model_name']}: {row['speedup']:.2f}x ({row['eager_time_ms']:.1f}ms → {row['graph_time_ms']:.1f}ms)")
     
     print("\n" + "="*80)
+
 
 def create_visualization(results):
     """Create visualization of results"""
@@ -794,10 +684,10 @@ def create_visualization(results):
     
     # 2. Eager vs Graph mode times
     model_times = df.groupby('model_name')[['eager_time_ms', 'graph_time_ms']].mean()
-    x = np.arange(len(model_times))
+    x = list(range(len(model_times)))
     width = 0.35
-    ax2.bar(x - width/2, model_times['eager_time_ms'], width, label='Eager Mode', alpha=0.8)
-    ax2.bar(x + width/2, model_times['graph_time_ms'], width, label='Graph Mode', alpha=0.8)
+    ax2.bar([i - width/2 for i in x], model_times['eager_time_ms'], width, label='Eager Mode', alpha=0.8)
+    ax2.bar([i + width/2 for i in x], model_times['graph_time_ms'], width, label='Graph Mode', alpha=0.8)
     ax2.set_xlabel('Models')
     ax2.set_ylabel('Time (ms)')
     ax2.set_title('Execution Time Comparison')
@@ -821,24 +711,26 @@ def create_visualization(results):
     ax4.set_title('Memory Overhead by Model')
     
     plt.tight_layout()
-    plt.savefig('gcn_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
-    print(f"📈 Visualization saved to gcn_graph_vs_eager_benchmark.png")
+    plt.savefig('gat_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
+    print(f"📈 Visualization saved to gat_graph_vs_eager_benchmark.png")
+
 
 def main():
     """Main benchmarking function"""
-    print("Starting GCN Graph Mode vs Eager Mode Benchmark...")
+    print("Starting GAT Graph Mode vs Eager Mode Benchmark...")
     print(f"Device: {DEVICE}")
     print(f"Warmup runs: {WARMUP_RUNS}")
     print(f"Timing runs: {TIMING_RUNS}")
     
     # Run benchmark
-    results = run_gnn_benchmark()
+    results = run_gat_benchmark()
     
     # Save and analyze results
     save_results(results)
     create_visualization(results)
     
     print("\n🎉 Benchmark completed successfully!")
+
 
 if __name__ == "__main__":
     main() 
