@@ -37,15 +37,18 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Configuration
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-WARMUP_RUNS = 5
-TIMING_RUNS = 20
+WARMUP_RUNS = 100
+TIMING_RUNS = 100
 GUARD_RUNS = 10
-BATCH_SIZES = [32, 64, 128]
+BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 NODE_COUNTS = [100, 500, 1000]  # Number of nodes in graph
 FEATURE_DIMS = [64, 128, 256]   # Node feature dimensions
 
-print(f"Running GNN benchmarks on: {DEVICE}")
+print(f"Running GCN benchmarks on: {DEVICE}")
 print(f"PyTorch version: {torch.__version__}")
+print(f"Warmup iterations: {WARMUP_RUNS}")
+print(f"Timing iterations: {TIMING_RUNS}")
+print(f"Testing batch sizes: {BATCH_SIZES}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name()}")
     print(f"CUDA version: {torch.version.cuda}")
@@ -305,21 +308,37 @@ def run_gnn_benchmark():
         'GCN-Large': (GCNModel, {'input_dim': 256, 'hidden_dim': 512, 'output_dim': 128, 'num_layers': 4}),
     }
     
-    # Graph configurations to test
-    graph_configs = [
-        {'batch_size': 32, 'num_nodes': 100, 'feature_dim': 64},
-        {'batch_size': 64, 'num_nodes': 500, 'feature_dim': 128},
-        {'batch_size': 128, 'num_nodes': 1000, 'feature_dim': 256},
-    ]
+    # Graph configurations to test - different batch sizes with fixed graph properties
+    graph_configs = []
+    for batch_size in BATCH_SIZES:
+        # Test with medium-sized graphs to focus on batch size impact
+        graph_configs.append({
+            'batch_size': batch_size, 
+            'num_nodes': 100, 
+            'feature_dim': 64
+        })
+        
+    # Also test a few larger configurations with select batch sizes
+    for batch_size in [1, 8, 32]:
+        graph_configs.append({
+            'batch_size': batch_size, 
+            'num_nodes': 500, 
+            'feature_dim': 128
+        })
     
     results = []
     
     print("="*80)
     print("GCN GRAPH MODE vs EAGER MODE BENCHMARK")
     print("="*80)
+    print(f"Total configurations to test: {len(graph_configs)}")
+    print(f"Batch sizes: {BATCH_SIZES}")
+    print(f"Warmup iterations: {WARMUP_RUNS}")
+    print(f"Timing iterations: {TIMING_RUNS}")
+    print("="*80)
     
     for config_idx, graph_config in enumerate(graph_configs):
-        print(f"\n📊 Testing Configuration {config_idx + 1}/3:")
+        print(f"\n📊 Testing Configuration {config_idx + 1}/{len(graph_configs)}:")
         print(f"   Batch Size: {graph_config['batch_size']}")
         print(f"   Nodes: {graph_config['num_nodes']}")
         print(f"   Feature Dim: {graph_config['feature_dim']}")
@@ -402,7 +421,7 @@ def save_results(results):
     df = pd.DataFrame(results)
     
     # Save to CSV
-    csv_filename = 'gnn_graph_vs_eager_results.csv'
+    csv_filename = 'gcn_graph_vs_eager_results.csv'
     df.to_csv(csv_filename, index=False)
     print(f"\n📝 Results saved to {csv_filename}")
     
@@ -492,8 +511,8 @@ def create_visualization(results):
     ax4.set_title('Memory Overhead by Model')
     
     plt.tight_layout()
-    plt.savefig('gnn_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
-    print(f"📈 Visualization saved to gnn_graph_vs_eager_benchmark.png")
+    plt.savefig('gcn_graph_vs_eager_benchmark.png', dpi=300, bbox_inches='tight')
+    print(f"📈 Visualization saved to gcn_graph_vs_eager_benchmark.png")
 
 def main():
     """Main benchmarking function"""
